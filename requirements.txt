@@ -3,6 +3,7 @@ tensorflow==2.20.0
 numpy==2.1.3
 pillow>=7.1.0,<11
 requests==2.32.4
+beautifulsoup4
 sentence-transformers==2.7.0
 faiss-cpu==1.15.0
 nltk==3.9.1
