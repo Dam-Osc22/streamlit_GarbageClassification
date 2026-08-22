@@ -14,9 +14,6 @@ import google.generativeai as genai
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 import io # Needed for BytesIO for image processing
 
-# --- Streamlit Application UI ---
-st.set_page_config(page_title="Garbage Classification & Recycling Advisor", layout="centered")
-
 # --- NLTK Data Downloads ---
 # NLTK downloads should ideally happen outside the main app run flow if possible,
 # or be handled gracefully. On Streamlit Community Cloud, these will download once
@@ -39,13 +36,16 @@ IMG_WIDTH = 128
 gemini_text_model = None
 gemini_vision_model = None
 
+# --- Streamlit Application UI ---
+st.set_page_config(page_title="Garbage Classification & Recycling Advisor", layout="centered")
+
 @st.cache_resource
 def load_gemini_api_config(api_key):
     genai.configure(api_key=api_key)
     # The user specified gemini-2.5-flash for vision.
     # gemini-flash-latest is good for general text.
     text_model = genai.GenerativeModel('gemini-flash-latest')
-    vision_model = genai.GenerativeModel('gemini-2.5-flash')
+    vision_model = genai.GenerativeModel('gemini-3.6-flash') # Updated vision model to gemini-3.6-flash
     return text_model, vision_model
 
 try:
@@ -157,14 +157,13 @@ def classify_and_get_rag_info_streamlit(pil_image):
 
     # Prepare image for Gemini Vision API
     img_bytes = io.BytesIO()
-
+    
     # Convert to standard RGB if the uploaded image has transparency
     if pil_image.mode in ('RGBA', 'LA') or (pil_image.mode == 'P' and 'transparency' in pil_image.info):
         pil_image = pil_image.convert('RGB')
 
     # Now it is completely safe to save as a JPEG!
-    pil_image.save(img_bytes, format='JPEG')
-
+    pil_image.save(img_bytes, format='JPEG') # Save PIL Image to bytes
     image_parts = [{"mime_type": "image/jpeg", "data": img_bytes.getvalue()}]
 
     # --- Image Classification using Gemini Vision Model ---
