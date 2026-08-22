@@ -1,9 +1,8 @@
-# 📦 Streamlit App Starter Kit 
+# Garbage Classification and Compost/Recyclable Material Advice 
 ```
 ⬆️ (Replace above with your app's name)
 ```
-
-Description of the app ...
+This app will take images as input and classify the type of garbage item. The primary focus is to detect when a compostable or recyclable item has been detected to give advice as to what can be done with these two types of materials based on EPA Information for Compostable and Recyclable Materials. 
 
 ## Demo App
 
