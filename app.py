@@ -14,6 +14,9 @@ import google.generativeai as genai
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 import io # Needed for BytesIO for image processing
 
+# --- Streamlit Application UI ---
+st.set_page_config(page_title="Garbage Classification & Recycling Advisor", layout="centered")
+
 # --- NLTK Data Downloads ---
 # NLTK downloads should ideally happen outside the main app run flow if possible,
 # or be handled gracefully. On Streamlit Community Cloud, these will download once
@@ -207,9 +210,6 @@ def classify_and_get_rag_info_streamlit(pil_image):
     }
 
     return classification_result
-
-# --- Streamlit Application UI ---
-st.set_page_config(page_title="Garbage Classification & Recycling Advisor", layout="centered")
 
 st.title("🗑️ Garbage Classification & Recycling Advisor")
 st.markdown("Upload an image of a waste item. I'll classify it and provide relevant recycling or composting advice from EPA sources using advanced AI.")
