@@ -1,3 +1,10 @@
 streamlit
-pandas
+tensorflow
 numpy
+Pillow
+requests
+sentence-transformers
+faiss-cpu
+nltk
+google-generativeai
+tenacity
