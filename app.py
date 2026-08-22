@@ -1,119 +1,111 @@
-from tenacity import retry, wait_random_exponential, stop_after_attempt
 import streamlit as st
-import tensorflow as tf
-from tensorflow.keras.preprocessing import image
-import numpy as np
+import numpy as np # Keep numpy for array operations on image
 from PIL import Image
 import os
 import requests
 from bs4 import BeautifulSoup
 import re
-from sentence_transformers import SentenceTransformer
-import faiss
 import json
 import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from collections import Counter
 import google.generativeai as genai
+from tenacity import retry, wait_random_exponential, stop_after_attempt
+import io # Needed for BytesIO for image processing
 
 # --- NLTK Data Downloads ---
+# NLTK downloads should ideally happen outside the main app run flow if possible,
+# or be handled gracefully. On Streamlit Community Cloud, these will download once
+# into the app environment.
 try:
     stopwords.words('english')
 except LookupError:
     nltk.download('stopwords')
 try:
-    word_tokenize("test")
+    word_tokenize("test") # 'punkt' is needed for word_tokenize
 except LookupError:
     nltk.download('punkt')
 
 # --- Constants ---
+# IMG_HEIGHT and IMG_WIDTH still useful for resizing images before sending to Gemini Vision
 IMG_HEIGHT = 128
 IMG_WIDTH = 128
-CHUNK_SIZE = 500  # Characters per chunk
-CHUNK_OVERLAP = 100 # Overlap to maintain context between chunks
 
-# --- Model Architectures ---
-def create_stage1_model(input_shape=(IMG_HEIGHT, IMG_WIDTH, 3)):
-    """Defines the architecture for the Stage 1 binary classification model."""
-    model = tf.keras.models.Sequential([
-        tf.keras.layers.Flatten(input_shape=input_shape),
-        tf.keras.layers.Dense(1, activation='sigmoid')
-    ])
-    return model
+# --- Gemini API Setup ---
+gemini_text_model = None
+gemini_vision_model = None
 
-def create_stage2_model(input_shape=(IMG_HEIGHT, IMG_WIDTH, 3), num_classes_val=None):
-    """Defines the architecture for the Stage 2 multi-class classification model."""
-    if num_classes_val is None:
-        raise ValueError("num_classes_val must be provided.")
-    model = tf.keras.models.Sequential([
-        tf.keras.layers.Flatten(input_shape=input_shape),
-        tf.keras.layers.Dense(num_classes_val, activation='softmax')
-    ])
-    return model
+@st.cache_resource
+def load_gemini_api_config(api_key):
+    genai.configure(api_key=api_key)
+    # The user specified gemini-2.5-flash for vision.
+    # gemini-flash-latest is good for general text.
+    text_model = genai.GenerativeModel('gemini-flash-latest')
+    vision_model = genai.GenerativeModel('gemini-2.5-flash')
+    return text_model, vision_model
 
-# --- RAG Helper Function: Text Chunking ---
-def chunk_text(text, chunk_size, chunk_overlap):
-    """Splits a given text into overlapping chunks for RAG processing."""
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunk = text[start:end]
-        chunks.append(chunk)
-        start += chunk_size - chunk_overlap
-        if start >= len(text):
-            break
-    return chunks
-
-# --- Gemini API Setup for Summarization ---
-# This part assumes the API key is set as an environment variable or a Streamlit secret
 try:
     gemini_api_key = os.getenv('GOOGLE_API_KEY')
     if not gemini_api_key:
         st.error("GOOGLE_API_KEY not found. Please set it as an environment variable or Streamlit secret.")
     else:
-        genai.configure(api_key=gemini_api_key)
-        # Initialize Gemini model once using st.cache_resource
-        @st.cache_resource
-        def load_gemini_model():
-            return genai.GenerativeModel('gemini-flash-latest')
-        gemini_model = load_gemini_model()
-
+        gemini_text_model, gemini_vision_model = load_gemini_api_config(gemini_api_key)
 except Exception as e:
-    st.error(f"Error configuring Gemini API for summarization: {e}")
-    gemini_model = None # Set to None if API fails to configure
+    st.error(f"Error configuring Gemini API: {e}. Image classification and advice generation will be disabled.")
+
 
 @retry(wait=wait_random_exponential(multiplier=1, min=4, max=10), stop=stop_after_attempt(3))
 def generate_summary_with_gemini(text_chunk):
-    """Generates a brief summary of a text chunk using the Gemini API with retry logic."""
-    if gemini_model is None:
+    """Generates a brief summary of a text chunk using the Gemini API text model with retry logic."""
+    if gemini_text_model is None:
         return "[LLM unavailable for summarization]"
     try:
-        prompt = f"Summarize the following text briefly for a user interested in recycling or composting advice. Focus on key actions or information: {text_chunk}"
-        response = gemini_model.generate_content(prompt)
+        # Adjusted prompt for a more direct summary, as it's not for RAG retrieval anymore
+        prompt = f"Summarize the following text briefly, focusing on key actions or information for recycling or composting: {text_chunk}"
+        response = gemini_text_model.generate_content(prompt)
         return response.text
     except Exception as e:
         st.warning(f"Error calling Gemini API for summarization: {e}")
         return "[Error generating summary]"
 
-# --- Cached Function to Load All Models and RAG Data ---
+
+# --- RAG Helper Function: Advice Generation with Gemini Text Model ---
+@retry(wait=wait_random_exponential(multiplier=1, min=4, max=10), stop=stop_after_attempt(3))
+def generate_rag_advice_with_gemini(query, web_data_cleaned):
+    """Generates recycling/composting advice using Gemini's text capabilities based on cleaned web data."""
+    if gemini_text_model is None:
+        return {"summary": "[LLM unavailable for advice generation]", "source_doc": "N/A"}
+
+    # Combine all web text into a single context for Gemini.
+    # For very large datasets, this might exceed context window.
+    # A more advanced RAG would select specific relevant documents.
+    full_context = "\n\n".join([f"--- Document: {name} ---\n{text}" for name, text in web_data_cleaned.items()])
+
+    # Formulate a prompt to guide Gemini in providing relevant advice
+    prompt = f"""Based on the following context documents and the query '{query}', provide concise and actionable recycling or composting advice.
+    For each piece of advice, clearly indicate which document it came from (e.g., 'From EPA Composting: ...').
+
+    Context Documents:
+    {full_context}
+
+    Query: {query}
+
+    Advice:
+    """
+    try:
+        response = gemini_text_model.generate_content(prompt)
+        # Gemini's response will be the advice, sources are expected to be embedded by Gemini itself
+        return {"summary": response.text, "source_doc": "Multiple EPA Sources"} # Gemini should cite in its response
+    except Exception as e:
+        st.warning(f"Error generating RAG advice with Gemini: {e}")
+        return {"summary": "[Error generating advice]", "source_doc": "N/A"}
+
+
+# --- Cached Function to Load RAG Data ---
 @st.cache_resource
-def load_models_and_rag_data():
-    """Loads and caches all ML models and RAG data for the Streamlit app."""
-    # Instantiate Stage 1 Model and Load Weights
-    stage1_model_loaded = create_stage1_model()
-    stage1_model_loaded.load_weights('best_stage1_model.weights.h5')
-
-    # Instantiate Stage 2 Model and Load Weights
-    num_classes_garbage = 10 # Hardcoded based on notebook's output
-    stage2_model_loaded = create_stage2_model(num_classes_val=num_classes_garbage)
-    stage2_model_loaded.load_weights('best_stage2_model.weights.h5')
-
-    # Load Sentence Transformer model
-    embedding_model_loaded = SentenceTransformer('all-MiniLM-L6-v2')
-
-    # --- RAG Data Processing ---
+def load_rag_data():
+    """Downloads and processes web content for RAG, caching the result."""
     web_urls = [
         {'name': 'EPA Composting', 'url': 'https://www.epa.gov/recycle/composting-home'},
         {'name': 'EPA Recycling', 'url': 'https://www.epa.gov/recycle/recycling-basics-and-benefits'}
@@ -139,100 +131,80 @@ def load_models_and_rag_data():
         except Exception as e:
             st.warning(f"Error processing web content for {doc_name}: {e}")
 
-    all_chunks = []
-    chunk_metadata = [] # (doc_name, chunk_index)
-    for doc_name, text_content in web_text_data_cleaned.items():
-        doc_chunks = chunk_text(text_content, CHUNK_SIZE, CHUNK_OVERLAP)
-        all_chunks.extend(doc_chunks)
-        chunk_metadata.extend([(doc_name, i) for i in range(len(doc_chunks))])
-
-    chunk_embeddings = np.array([])
-    faiss_index = None
-
-    if all_chunks:
-        chunk_embeddings = embedding_model_loaded.encode(all_chunks, show_progress_bar=False)
-        embedding_dimension = chunk_embeddings.shape[1]
-        faiss_index = faiss.IndexFlatL2(embedding_dimension)
-        faiss_index.add(np.array(chunk_embeddings))
-
-    # Define class labels for the models
+    # Define class labels directly, as models are no longer loaded locally
     stage1_class_labels = ['biodegradable', 'non-biodegradable']
     stage2_class_labels = ['battery', 'biological', 'cardboard', 'clothes', 'glass', 'metal', 'paper', 'plastic', 'shoes', 'trash']
 
-    return stage1_model_loaded, stage2_model_loaded, embedding_model_loaded, faiss_index, all_chunks, chunk_metadata, stage1_class_labels, stage2_class_labels
+    return web_text_data_cleaned, stage1_class_labels, stage2_class_labels
 
-# Load all necessary components when the app starts
-stage1_model, stage2_model, embedding_model, faiss_index, all_chunks, chunk_metadata, stage1_class_labels, stage2_class_labels = load_models_and_rag_data()
+# Load RAG data and class labels when the app starts
+web_text_data_cleaned, stage1_class_labels, stage2_class_labels = load_rag_data()
 
-# --- RAG Helper Function: Retrieval ---
-def retrieve_info_from_rag(query, top_k=3):
-    """Retrieves relevant text chunks from the FAISS index based on a query."""
-    if faiss_index is None:
-        return []
-    query_embedding = embedding_model.encode([query])
-    distances, indices = faiss_index.search(query_embedding, top_k)
 
-    retrieved_info = []
-    for i, idx in enumerate(indices[0]):
-        if idx < len(all_chunks): # Safety check for valid index
-            retrieved_info.append({
-                'text': all_chunks[idx],
-                'source_doc': chunk_metadata[idx][0],
-                'distance': distances[0][i]
-            })
-    return retrieved_info
-
-# --- Combined Classification and RAG Function ---
+# --- Combined Classification and RAG Function (Streamlit) ---
 def classify_and_get_rag_info_streamlit(pil_image):
-    """Classifies an image and retrieves RAG information with summaries for Streamlit display."""
-    # Preprocess the uploaded image
-    img = pil_image.resize((IMG_WIDTH, IMG_HEIGHT))
-    img_array = image.img_to_array(img)
-    img_array = np.expand_dims(img_array, axis=0) # Add batch dimension
-    img_array = img_array / 255.0 # Rescale to [0, 1]
+    """Classifies an image using Gemini Vision and generates RAG advice using Gemini Text."""
+    if gemini_vision_model is None or gemini_text_model is None:
+        return {
+            'main_category': "Error",
+            'specific_type': "Error",
+            'rag_info': [{'summary': "[Gemini API not configured]", 'source_doc': "N/A"}],
+            'rag_query': ""
+        }
 
-    # Stage 1 Classification (Biodegradable vs. Non-Biodegradable)
-    stage1_pred_raw = stage1_model.predict(img_array, verbose=0)
-    biodegradable_score = stage1_pred_raw[0][0]
+    # Prepare image for Gemini Vision API
+    img_bytes = io.BytesIO()
+    pil_image.save(img_bytes, format='JPEG') # Save PIL Image to bytes
+    image_parts = [{"mime_type": "image/jpeg", "data": img_bytes.getvalue()}]
 
-    classification_result = {}
+    # --- Image Classification using Gemini Vision Model ---
+    classification_prompt = [
+        "Analyze the image and classify the waste. First, state if it is 'biodegradable' or 'non-biodegradable'. "
+        "Then, if non-biodegradable, identify the specific type from these categories: 'battery', 'biological', 'cardboard', 'clothes', 'glass', 'metal', 'paper', 'plastic', 'shoes', 'trash'. "
+        "Provide the output as two separate classifications on new lines, exactly in the format: 'Overall category: [category]' and 'Specific type: [type]' (if applicable, otherwise omit 'Specific type')."
+        "Example 1: 'Overall category: biodegradable'"
+        "Example 2: 'Overall category: non-biodegradable\nSpecific type: plastic'",
+        image_parts[0]
+    ]
+
+    try:
+        vision_response = gemini_vision_model.generate_content(classification_prompt)
+        classification_text = vision_response.text.strip()
+    except Exception as e:
+        st.error(f"Error classifying image with Gemini Vision API: {e}")
+        classification_text = "Overall category: unknown" # Fallback
+
+    main_category = "unknown"
+    specific_type = "unknown"
     rag_query = ""
 
-    if biodegradable_score < 0.5: # Biodegradable
-        main_category = stage1_class_labels[0]
-        main_category_confidence = 1 - biodegradable_score
+    # Parse classification text
+    lines = classification_text.split('\n')
+    for line in lines:
+        if line.startswith("Overall category:"):
+            main_category = line.split(":", 1)[1].strip().lower()
+        elif line.startswith("Specific type:"):
+            specific_type = line.split(":", 1)[1].strip().lower()
+
+    if main_category == 'biodegradable':
         rag_query = "how to compost food scraps or biodegradable waste"
-    else: # Non-Biodegradable
-        main_category = stage1_class_labels[1]
-        main_category_confidence = biodegradable_score
-
-        # Stage 2 Classification (Specific Garbage Type) for non-biodegradable
-        stage2_pred = stage2_model.predict(img_array, verbose=0)
-        predicted_class_index = np.argmax(stage2_pred[0])
-        specific_type = stage2_class_labels[predicted_class_index]
-        specific_type_confidence = stage2_pred[0][predicted_class_index]
+    elif main_category == 'non-biodegradable' and specific_type != 'unknown':
         rag_query = f"how to recycle {specific_type} waste"
+    else:
+        rag_query = "general recycling and composting advice"
 
-        classification_result['specific_type'] = specific_type
-        classification_result['specific_type_confidence'] = specific_type_confidence
+    # --- Generate RAG Advice using Gemini Text Model ---
+    rag_advice = generate_rag_advice_with_gemini(rag_query, web_text_data_cleaned)
 
-    classification_result['main_category'] = main_category
-    classification_result['main_category_confidence'] = main_category_confidence
-
-    # Retrieve RAG information
-    retrieved_rag_info = retrieve_info_from_rag(rag_query, top_k=2)
-
-    # Generate summaries for retrieved info
-    summarized_rag_info = []
-    for item in retrieved_rag_info:
-        summary = generate_summary_with_gemini(item['text'])
-        summarized_rag_info.append({
-            'summary': summary,
-            'source_doc': item['source_doc']
-        })
-
-    classification_result['rag_info'] = summarized_rag_info
-    classification_result['rag_query'] = rag_query
+    classification_result = {
+        'main_category': main_category,
+        # Confidence is not directly available from Gemini's generative response
+        'main_category_confidence': "N/A",
+        'specific_type': specific_type if specific_type != 'unknown' else None,
+        'specific_type_confidence': "N/A", # Not directly available
+        'rag_info': [rag_advice], # Now rag_advice is a dictionary
+        'rag_query': rag_query
+    }
 
     return classification_result
 
@@ -240,7 +212,7 @@ def classify_and_get_rag_info_streamlit(pil_image):
 st.set_page_config(page_title="Garbage Classification & Recycling Advisor", layout="centered")
 
 st.title("🗑️ Garbage Classification & Recycling Advisor")
-st.markdown("Upload an image of a waste item. I'll classify it and provide relevant recycling or composting advice from EPA sources.")
+st.markdown("Upload an image of a waste item. I'll classify it and provide relevant recycling or composting advice from EPA sources using advanced AI.")
 
 uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
 
@@ -250,47 +222,51 @@ if uploaded_file is not None:
     st.write("")
 
     if st.button("Classify & Get Advice"):
-        with st.spinner("Classifying and fetching and summarizing advice..."):
+        with st.spinner("Classifying image and fetching advice..."):
             results = classify_and_get_rag_info_streamlit(image_display)
 
             st.subheader("Classification Results:")
             if results['main_category'] == 'biodegradable':
-                st.success(f"This item is likely **Biodegradable** (Confidence: {results['main_category_confidence']:.2f}).")
-                st.markdown("--- # Composting Advice")
-                st.subheader(f"Composting Advice for Biodegradable Waste:")
+                st.success(f"This item is likely **Biodegradable**.")
+                st.markdown("---")
+                st.subheader(f"Composting Advice:")
+            elif results['main_category'] == 'non-biodegradable':
+                st.info(f"This item is likely **Non-Biodegradable**.")
+                if results.get('specific_type') and results['specific_type'] != 'unknown':
+                    st.write(f"Specifically, it appears to be **{results['specific_type'].replace('_', ' ').title()}**.")
+                st.markdown("---")
+                st.subheader(f"Recycling Advice:")
             else:
-                st.info(f"This item is likely **Non-Biodegradable** (Confidence: {results['main_category_confidence']:.2f}).")
-                if results.get('specific_type'): # Check if specific type was classified
-                    st.write(f"Specifically, it appears to be **{results['specific_type'].replace('_', ' ').title()}** (Confidence: {results['specific_type_confidence']:.2f}).")
-                st.markdown("--- # Recycling Advice")
-                st.subheader(f"Recycling Advice for {results['main_category'].capitalize()} Waste:")
+                 st.warning(f"Could not confidently classify the item.")
+                 st.markdown("---")
+                 st.subheader(f"General Advice:")
+
 
             # Display RAG information (now with summaries)
             if results['rag_info']:
                 st.markdown(f"**Relevant information related to '{results['rag_query']}' from EPA sources:**")
-                for i, res in enumerate(results['rag_info']):
+                for i, res in enumerate(results['rag_info']): # This loop will only run once now
                     st.markdown(f"- **Source:** {res['source_doc']}")
-                    st.markdown(f"  **Summary:** {res['summary']}")
+                    st.markdown(f"  **Advice:** {res['summary']}")
             else:
                 st.warning("No specific relevant information found from EPA sources for this query.")
 
-            st.markdown("--- # Your Feedback")
+            st.markdown("---")
+            st.subheader("Help Us Improve!")
+            st.markdown("Your feedback helps us make this tool better. Please let us know what you think.")
 
-    st.subheader("Help Us Improve!")
-    st.markdown("Your feedback helps us make this tool better. Please let us know what you think.")
+            # Feedback inputs
+            classification_feedback = st.text_area(
+                "**Classification Accuracy:** Was the item classified correctly? If not, what was it?",
+                key="clf_feedback"
+            )
+            rag_feedback = st.text_area(
+                "**Advice Usefulness:** Was the recycling/composting advice helpful and relevant to your needs?",
+                key="rag_feedback"
+            )
 
-    # Feedback inputs
-    classification_feedback = st.text_area(
-        "**Classification Accuracy:** Was the item classified correctly? If not, what was it?",
-        key="clf_feedback"
-    )
-    rag_feedback = st.text_area(
-        "**Advice Usefulness:** Was the recycling/composting advice helpful and relevant to your needs?",
-        key="rag_feedback"
-    )
-
-    if st.button("Submit Feedback"):
-        if classification_feedback or rag_feedback:
-            st.success("Thank you for your valuable feedback! We appreciate your input.")
-        else:
-            st.warning("Please provide some feedback in at least one of the boxes before submitting.")
+            if st.button("Submit Feedback"):
+                if classification_feedback or rag_feedback:
+                    st.success("Thank you for your valuable feedback! We appreciate your input.")
+                else:
+                    st.warning("Please provide some feedback in at least one of the boxes before submitting.")
