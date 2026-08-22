@@ -1,10 +1,11 @@
-streamlit
-tensorflow
-numpy
-Pillow
-requests
-sentence-transformers
-faiss-cpu
-nltk
-google-generativeai
-tenacity
+%%writefile requirements.txt
+streamlit==1.36.0
+tensorflow==2.20.0
+numpy==2.1.3
+Pillow==11.3.0
+requests==2.32.4
+sentence-transformers==2.7.0
+faiss-cpu==1.15.0
+nltk==3.9.1
+google-generativeai==0.9.0
+tenacity==8.4.2
