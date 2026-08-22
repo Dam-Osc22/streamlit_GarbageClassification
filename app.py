@@ -1,5 +1,3 @@
-%%writefile app.py
-
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 import streamlit as st
 import tensorflow as tf
