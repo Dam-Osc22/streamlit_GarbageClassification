@@ -160,7 +160,7 @@ def classify_and_get_rag_info_streamlit(pil_image):
 
     # Convert to standard RGB if the uploaded image has transparency
     if pil_image.mode in ('RGBA', 'LA') or (pil_image.mode == 'P' and 'transparency' in pil_image.info):
-    pil_image = pil_image.convert('RGB')
+        pil_image = pil_image.convert('RGB')
 
     # Now it is completely safe to save as a JPEG!
     pil_image.save(img_bytes, format='JPEG')
