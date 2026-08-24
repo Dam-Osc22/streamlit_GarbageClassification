@@ -13,6 +13,7 @@ from collections import Counter
 import google.generativeai as genai
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 import io # Needed for BytesIO for image processing
+from datetime import datetime # Import datetime for timestamps
 
 # --- NLTK Data Downloads ---
 # NLTK downloads should ideally happen outside the main app run flow if possible,
@@ -157,7 +158,7 @@ def classify_and_get_rag_info_streamlit(pil_image):
 
     # Prepare image for Gemini Vision API
     img_bytes = io.BytesIO()
-    
+
     # Convert to standard RGB if the uploaded image has transparency
     if pil_image.mode in ('RGBA', 'LA') or (pil_image.mode == 'P' and 'transparency' in pil_image.info):
         pil_image = pil_image.convert('RGB')
@@ -170,7 +171,7 @@ def classify_and_get_rag_info_streamlit(pil_image):
     classification_prompt = [
         "Analyze the image and classify the waste. First, state if it is 'biodegradable' or 'non-biodegradable'. "
         "Then, if non-biodegradable, identify the specific type from these categories: 'battery', 'biological', 'cardboard', 'clothes', 'glass', 'metal', 'paper', 'plastic', 'shoes', 'trash'. "
-        "Provide the output as two separate classifications on new lines, exactly in the format: 'Overall category: [category]' and 'Specific type: [type]' (if applicable, otherwise omit 'Specific type')."
+        "Provide the output as two separate classifications on new lines, exactly in the format: 'Overall category: [category]' and 'Specific type: [type]' (if applicable, otherwise omit 'Specific type)."
         "Example 1: 'Overall category: biodegradable'"
         "Example 2: 'Overall category: non-biodegradable\nSpecific type: plastic'",
         image_parts[0]
@@ -273,6 +274,29 @@ if uploaded_file is not None:
 
             if st.button("Submit Feedback"):
                 if classification_feedback or rag_feedback:
-                    st.success("Thank you for your valuable feedback! We appreciate your input.")
+                    # Save feedback to a text file
+                    try:
+                        feedback_filename = "GC_User Feedback.txt"
+                        with open(feedback_filename, "a") as f:
+                            f.write(f"--- Feedback Session: {datetime.now()} ---\n")
+                            if classification_feedback:
+                                f.write(f"Classification Feedback: {classification_feedback}\n")
+                            if rag_feedback:
+                                f.write(f"RAG Advice Feedback: {rag_feedback}\n")
+                            f.write("\n") # Add a separator for readability
+                        st.success("Thank you for your valuable feedback! We appreciate your input and it has been saved.")
+
+                        # Add download button for the feedback file
+                        if os.path.exists(feedback_filename):
+                            with open(feedback_filename, "rb") as f:
+                                st.download_button(
+                                    label="Download Feedback File",
+                                    data=f.read(),
+                                    file_name=feedback_filename,
+                                    mime="text/plain"
+                                )
+
+                    except Exception as e:
+                        st.error(f"An error occurred while saving feedback: {e}")
                 else:
                     st.warning("Please provide some feedback in at least one of the boxes before submitting.")
